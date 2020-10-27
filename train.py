@@ -12,61 +12,81 @@ y_train = train[1]
 onehot = np.zeros((y_train.size, y_train.max()+1))
 onehot[np.arange(y_train.size), y_train] = 1
 
-zinp = tf.keras.layers.Input((49, ))
-z = tf.keras.layers.Reshape((7, 7, 1))(zinp)
-z = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(z)
-z = tf.keras.layers.Conv2DTranspose(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(z)
-z = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(z)
-z = tf.keras.layers.Conv2DTranspose(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(z)
-z = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(z)
 
-yinp = tf.keras.layers.Input((10, ))
-y = tf.keras.layers.Dense(49, activation='relu')(yinp)
-y = tf.keras.layers.Reshape((7, 7, 1))(y)
-y = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(y)
-y = tf.keras.layers.Conv2DTranspose(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(y)
-y = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(y)
-y = tf.keras.layers.Conv2DTranspose(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(y)
-y = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(y)
+def conv_layer(inp, filters, kernel_size=(3, 3), dropout=0, transpose=False, **kwargs):
+    out = tf.keras.layers.Conv2D(filters, kernel_size=kernel_size, padding='same', **kwargs)(inp)
+    if transpose:
+        out = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, padding='valid', **kwargs)(inp)
+    if dropout:
+        out = tf.keras.layers.Dropout(rate=dropout)(out)
+    out = tf.keras.layers.PReLU(shared_axes=[1, 2])(out)
+    return out
 
-generator_out = tf.keras.layers.Concatenate()([z, y])
-generator_out = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(generator_out)
 
-generator = tf.keras.Model(inputs=[zinp, yinp], outputs=generator_out)
-gvars = generator.trainable_variables
+# Define the generator
+def get_generator(lat_dim=49, class_dim=10, filters=32):
+    zinp = tf.keras.layers.Input((lat_dim,))
+    m = int(np.sqrt(lat_dim))
+    z = tf.keras.layers.Reshape((m, m, 1))(zinp)
+    z = conv_layer(z, filters=filters)
+    z = conv_layer(z, filters=filters)
+    z = conv_layer(z, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
+    z = conv_layer(z, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
+    z = conv_layer(z, filters=filters)
 
-dginp = tf.keras.layers.Input((28, 28, 1))
+    yinp = tf.keras.layers.Input((class_dim, ))
+    y = tf.keras.layers.Dense(lat_dim)(yinp)
+    y = tf.keras.layers.Reshape((m, m, 1))(y)
+    y = conv_layer(y, filters=filters)
+    y = conv_layer(y, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
+    y = conv_layer(y, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
+    y = conv_layer(y, filters=filters)
 
-d = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(dginp)
-d = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(d)
-d = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), padding='same', activation='relu')(d)
-d = tf.keras.layers.Conv2D(32, kernel_size=(2, 2), strides=(2, 2), padding='valid', activation='relu')(d)
-d = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(d)
-d = tf.keras.layers.Flatten()(d)
-d = tf.keras.layers.Dense(10, activation='relu')(d)
+    out = tf.keras.layers.Concatenate()([z, y])
+    out = conv_layer(out, filters=filters)
+    out = conv_layer(out, filters=filters)
+    out = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(out)
 
-dyinp = tf.keras.layers.Input((10, ))
-dy = tf.keras.layers.Dense(49, activation='relu')(dyinp)
-dy = tf.keras.layers.Dense(128, activation='relu')(dy)
-dy = tf.keras.layers.Dense(10, activation='relu')(dy)
+    generator = tf.keras.Model(inputs=[zinp, yinp], outputs=out)
+    return [zinp, yinp], out, generator
 
-discriminator_out = tf.keras.layers.Concatenate()([d, dy])
-discriminator_out = tf.keras.layers.Dense(1, activation='sigmoid')(discriminator_out)
 
-discriminator = tf.keras.Model(inputs=[dginp, dyinp], outputs=discriminator_out)
-dvars = discriminator.trainable_variables
+# Define discriminator
+def get_discriminator(img_dim=(28, 28, 1), class_dim=10, filters=32):
+    dginp = tf.keras.layers.Input(img_dim)
 
-x_true = tf.placeholder(tf.float32, (None, 28, 28, 1))
-label = tf.placeholder(tf.float32, (None, 10))
+    d = conv_layer(dginp, filters=filters)
+    d = conv_layer(d, filters=filters)
+    d = conv_layer(d, filters=filters, strides=(2, 2))
+    d = conv_layer(d, filters=filters, strides=(2, 2))
+    d = tf.keras.layers.Flatten()(d)
+    d = tf.keras.layers.Dense(class_dim, activation='relu')(d)
 
-eps = 1e-7
+    dyinp = tf.keras.layers.Input((class_dim,))
+    dy = tf.keras.layers.Dense(128, activation='relu')(dyinp)
+    dy = tf.keras.layers.Dense(10, activation='relu')(dy)
+
+    out = tf.keras.layers.Concatenate()([d, dy])
+    out = tf.keras.layers.Dense(256, activation='relu')(out)
+    out = tf.keras.layers.Dense(1, activation='sigmoid')(out)
+
+    discriminator = tf.keras.Model(inputs=[dginp, dyinp], outputs=out)
+    return [dginp, dyinp], out, discriminator
+
+
+ginp, gout, gen = get_generator()
+gvars = gen.trainable_variables
+
+dinp, dout, disc = get_discriminator()
+dvars = disc.trainable_variables
+
+
 # Discriminator tries to map x_true to output 1 and generator_out to output 0
 # Generator tries to find images such that discriminator thinks they are output 1
-loss = tf.reduce_mean(tf.log(discriminator([x_true, label]) + eps) +
-                      tf.log(1. - discriminator([generator([zinp, label]), label]) + eps))
+lip = 1e-8*(sum([tf.reduce_mean(g**2) for g in tf.gradients(disc(dinp), dvars)]) - 1)**2
+loss = tf.reduce_mean(disc(dinp) - disc([gen(ginp), ginp[1]]) + lip)
 
-
-lr = 1e-2
+lr = 1e-5
 opt = tf.train.AdamOptimizer(learning_rate=lr)
 
 train_gen = opt.minimize(loss, var_list=gvars)
@@ -74,53 +94,37 @@ train_disc = opt.minimize(-loss, var_list=dvars)
 
 sess.run(tf.global_variables_initializer())
 
-epochs = 20
-subepochs = 3
+epochs = 50
 batch_size = 32
 N = 60000
 
 for epoch in range(epochs):
+    LOSSD = []
+    LOSSG = []
     print("### Epoch %d ###" % epoch)
-    for subepoch in range(subepochs):
-        print("Discriminator subepoch %d" % subepoch)
 
-        # Train discriminator
-        LOSS = []
-        for batch in range(N//batch_size):
-            print("Progress %f " % (batch * batch_size / N), end='\r')
-            idx = np.random.choice(N, batch_size)
-            x, y = x_train[idx, ...], onehot[idx, ...]
-            z = np.random.normal(0, 1, (batch_size, 49))
+    for batch in range(N // batch_size):
+        print("Progress %f " % (batch * batch_size / N), end='\r')
+        idx = np.random.choice(N, batch_size)
+        x, y = x_train[idx, ...], onehot[idx, ...]
+        z = np.random.normal(0, 1, (batch_size, 49))
 
-            fd = {x_true: x,
-                  label: y,
-                  zinp: z}
+        fd = {dinp[0]: x,
+              dinp[1]: y,
+              ginp[0]: z,
+              ginp[1]: y}
 
-            l, _ = sess.run([loss, train_disc], feed_dict=fd)
-            LOSS.append(l)
-        print("Loss %f" % np.mean(LOSS))
-
-    for subepoch in range(subepochs):
-        print("Generator subepoch %d" % subepoch)
-        # Train generator
-        LOSS = []
-        for batch in range(N // batch_size):
-            print("Progress %f " % (batch * batch_size / N), end='\r')
-            idx = np.random.choice(N, batch_size)
-            x, y = x_train[idx, ...], onehot[idx, ...]
-            z = np.random.normal(0, 1, (batch_size, 49))
-            fd = {zinp: z,
-                  label: y,
-                  x_true: x}
-
-            l, _ = sess.run([loss, train_gen], feed_dict=fd)
-            LOSS.append(l)
-        print("Loss %f" % np.mean(LOSS))
+        ld, _ = sess.run([loss, train_disc], feed_dict=fd)
+        lg, _ = sess.run([loss, train_gen], feed_dict=fd)
+        LOSSD.append(ld)
+        LOSSG.append(lg)
+    print("Loss %f, %f" % (np.mean(LOSSD), np.mean(LOSSG)))
 
     z = np.random.normal(0, 1, (4, 49))
     y = onehot[np.random.choice(N, 4), ...]
 
-    gx = sess.run(generator_out, feed_dict={zinp: z, yinp: y})
+    gx = sess.run(gout, feed_dict={ginp[0]: z,
+                                   ginp[1]: y})
 
     plt.subplot(221)
     plt.imshow(gx[0, ..., 0])
