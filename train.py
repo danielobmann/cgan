@@ -64,7 +64,8 @@ def get_discriminator(img_dim=(28, 28, 1), class_dim=10, filters=32):
 
     dyinp = tf.keras.layers.Input((class_dim,))
     dy = tf.keras.layers.Dense(128, activation='relu')(dyinp)
-    dy = tf.keras.layers.Dense(10, activation='relu')(dy)
+    dy = tf.keras.layers.Dense(128, activation='relu')(dy)
+    dy = tf.keras.layers.Dense(class_dim, activation='relu')(dy)
 
     out = tf.keras.layers.Concatenate()([d, dy])
     out = tf.keras.layers.Dense(256, activation='relu')(out)
@@ -74,16 +75,16 @@ def get_discriminator(img_dim=(28, 28, 1), class_dim=10, filters=32):
     return [dginp, dyinp], out, discriminator
 
 
-ginp, gout, gen = get_generator()
+ginp, gout, gen = get_generator(filters=32)
 gvars = gen.trainable_variables
 
-dinp, dout, disc = get_discriminator()
+dinp, dout, disc = get_discriminator(filters=16)
 dvars = disc.trainable_variables
 
 
 # Discriminator tries to map x_true to output 1 and generator_out to output 0
 # Generator tries to find images such that discriminator thinks they are output 1
-lip = 1e-8*(sum([tf.reduce_mean(g**2) for g in tf.gradients(disc(dinp), dvars)]) - 1)**2
+lip = 1e1*sum([(tf.reduce_mean(g**2)-1)**2 for g in tf.gradients(disc(dinp), dinp)])
 loss = tf.reduce_mean(disc(dinp) - disc([gen(ginp), ginp[1]]) + lip)
 
 lr = 1e-5
@@ -94,7 +95,7 @@ train_disc = opt.minimize(-loss, var_list=dvars)
 
 sess.run(tf.global_variables_initializer())
 
-epochs = 50
+epochs = 200
 batch_size = 32
 N = 60000
 
