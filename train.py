@@ -84,18 +84,47 @@ dvars = disc.trainable_variables
 
 # Discriminator tries to map x_true to output 1 and generator_out to output 0
 # Generator tries to find images such that discriminator thinks they are output 1
-lip = 1e1*sum([(tf.reduce_mean(g**2)-1)**2 for g in tf.gradients(disc(dinp), dinp)])
-loss = tf.reduce_mean(disc(dinp) - disc([gen(ginp), ginp[1]]) + lip)
+LAM = 10
+z = tf.placeholder(tf.float32, (None, 49))
+x_true = tf.placeholder(tf.float32, (None, 28, 28, 1))
+x_gen = tf.placeholder(tf.float32, (None, 28, 28, 1))
+x_line = tf.placeholder(tf.float32, (None, 28, 28, 1))
+label = tf.placeholder(tf.float32, (None, 10))
 
-lr = 1e-5
+lip = LAM*sum([(tf.reduce_mean(g**2)-1)**2 for g in tf.gradients(disc([x_line, label]), [x_line, label])])
+loss = tf.reduce_mean(disc([x_true, label]) - disc([x_gen, label]) + lip)
+loss_gen = -tf.reduce_mean(disc([gen([z, label]), label]))
+
+lr = 1e-4
 opt = tf.train.AdamOptimizer(learning_rate=lr)
 
-train_gen = opt.minimize(loss, var_list=gvars)
+train_gen = opt.minimize(loss_gen, var_list=gvars)
 train_disc = opt.minimize(-loss, var_list=dvars)
+
+
+def get_disc_batch(batch_size, latent=49, N=60000):
+    idx = np.random.choice(N, batch_size)
+    lat = np.random.normal(0, 1, (batch_size, latent))
+    x_r, lab = x_train[idx, ...], onehot[idx, ...]
+    x_g = sess.run(gen([z, label]), feed_dict={z: lat, label: lab})
+    t = np.random.uniform(0, 1, (batch_size, 1, 1, 1))
+    x_l = t*x_r + (1 - t)*x_g
+    fd = {x_true: x_r, x_gen: x_g, x_line: x_l, label: lab}
+    return fd
+
+
+def get_gen_batch(batch_size, latent=49, N=60000):
+    idx = np.random.choice(N, batch_size)
+    lat = np.random.normal(0, 1, (batch_size, latent))
+    lab = onehot[idx, ...]
+    fd = {z: lat, label: lab}
+    return fd
+
 
 sess.run(tf.global_variables_initializer())
 
 epochs = 200
+ncritic = 5
 batch_size = 32
 N = 60000
 
@@ -105,43 +134,39 @@ for epoch in range(epochs):
     print("### Epoch %d ###" % epoch)
 
     for batch in range(N // batch_size):
-        print("Progress %f " % (batch * batch_size / N), end='\r')
-        idx = np.random.choice(N, batch_size)
-        x, y = x_train[idx, ...], onehot[idx, ...]
-        z = np.random.normal(0, 1, (batch_size, 49))
+        CRITIC = []
+        for _ in range(ncritic):
+            fd = get_disc_batch(batch_size=batch_size)
+            ld, _ = sess.run([loss, train_disc], feed_dict=fd)
+            CRITIC.append(ld)
 
-        fd = {dinp[0]: x,
-              dinp[1]: y,
-              ginp[0]: z,
-              ginp[1]: y}
+        fd = get_gen_batch(batch_size=batch_size)
+        lg, _ = sess.run([loss_gen, train_gen], feed_dict=fd)
 
-        ld, _ = sess.run([loss, train_disc], feed_dict=fd)
-        lg, _ = sess.run([loss, train_gen], feed_dict=fd)
-        LOSSD.append(ld)
         LOSSG.append(lg)
-    print("Loss %f, %f" % (np.mean(LOSSD), np.mean(LOSSG)))
+        LOSSD.append(np.mean(CRITIC))
+        print("Loss %f, %f" % (np.mean(LOSSD), np.mean(LOSSG)), end='\r')
 
-    z = np.random.normal(0, 1, (4, 49))
-    y = onehot[np.random.choice(N, 4), ...]
+    lat = np.random.normal(0, 1, (4, 49))
+    lab = onehot[np.random.choice(N, 4), ...]
 
-    gx = sess.run(gout, feed_dict={ginp[0]: z,
-                                   ginp[1]: y})
+    gx = sess.run(gen([z, label]), feed_dict={z: lat, label: lab})
 
     plt.subplot(221)
     plt.imshow(gx[0, ..., 0])
-    plt.title(str(np.argmax(y[0, ...])))
+    plt.title(str(np.argmax(lab[0, ...])))
 
     plt.subplot(222)
     plt.imshow(gx[1, ..., 0])
-    plt.title(str(np.argmax(y[1, ...])))
+    plt.title(str(np.argmax(lab[1, ...])))
 
     plt.subplot(223)
     plt.imshow(gx[2, ..., 0])
-    plt.title(str(np.argmax(y[2, ...])))
+    plt.title(str(np.argmax(lab[2, ...])))
 
     plt.subplot(224)
     plt.imshow(gx[3, ..., 0])
-    plt.title(str(np.argmax(y[3, ...])))
+    plt.title(str(np.argmax(lab[3, ...])))
 
     plt.savefig("images/epoch_" + str(epoch) + ".pdf")
     plt.clf()
