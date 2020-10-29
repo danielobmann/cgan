@@ -89,6 +89,7 @@ dvars = disc.trainable_variables
 # Discriminator tries to map x_true to output 1 and generator_out to output 0
 # Generator tries to find images such that discriminator thinks they are output 1
 LAM = 1e0
+lr = 1e-5
 z = tf.placeholder(tf.float32, (None, latent))
 label = tf.placeholder(tf.float32, (None, classes))
 x_true = tf.placeholder(tf.float32, (None, ) + img_size)
@@ -103,11 +104,28 @@ lip = LAM*sum([(tf.reduce_mean(g**2)-1)**2 for g in tf.gradients(disc([x_line, l
 loss_disc = tf.reduce_mean(disc([x_gen, label]) - disc([x_true, label]) + lip)
 loss_gen = -tf.reduce_mean(disc([x_gen, label]))
 
-lr = 1e-5
+
 opt = tf.train.AdamOptimizer(learning_rate=lr)
 
-train_gen = opt.minimize(loss_gen, var_list=gvars)
-train_disc = opt.minimize(loss_disc, var_list=dvars)
+grads_gen, _ = tf.clip_by_global_norm(tf.gradients(loss_gen, gvars), 1.)
+grads_disc, _ = tf.clip_by_global_norm(tf.gradients(loss_disc, dvars), 1.)
+
+train_gen = opt.apply_gradients(zip(grads_gen, gvars))
+train_disc = opt.apply_gradients(zip(grads_disc, dvars))
+
+############
+# Active gradients
+
+total_gen = int(np.sum([np.prod(t.shape) for t in gvars]))
+active_gen = sum([tf.count_nonzero(grad) for grad in grads_gen if grad is not None])/total_gen
+
+total_disc = int(np.sum([np.prod(t.shape) for t in dvars]))
+active_disc = sum([tf.count_nonzero(grad) for grad in grads_disc if grad is not None])/total_disc
+
+
+def print_info(progress, ld, lg, active_d, active_g, lip):
+    print("Progress: %f, Disc: %f (%f), Gen: %f (%f), Lip: %f" % (progress, ld, active_d, lg, active_g, lip), end='\r')
+    pass
 
 
 def get_disc_batch(batch_size, latent=49, N=60000):
@@ -141,15 +159,16 @@ for epoch in range(epochs):
         CRITIC = []
         critic_batches = [get_disc_batch(batch_size=batch_size) for i in range(ncritic)]
         for i in range(ncritic):
-            ld, _, lipschitz = sess.run([loss_disc, train_disc, lip], feed_dict=get_disc_batch(batch_size=batch_size))
+            fd = get_disc_batch(batch_size=batch_size)
+            ld, _, lipschitz, dd = sess.run([loss_disc, train_disc, lip, active_disc], feed_dict=fd)
             CRITIC.append(ld)
 
         fd = get_gen_batch(batch_size=batch_size)
-        lg, _ = sess.run([loss_gen, train_gen], feed_dict=fd)
+        lg, _, dg = sess.run([loss_gen, train_gen, active_gen], feed_dict=fd)
 
         LOSSG.append(lg)
         LOSSD.append(np.mean(CRITIC))
-        print("Progress: %f, Disc: %f, Gen: %f, Lipschitz: %f" % ((batch*batch_size)/N, np.mean(LOSSD), np.mean(LOSSG), lipschitz), end='\r')
+        print_info((batch*batch_size)/N, ld, lg, dd, dg, lipschitz)
 
     lat = np.random.normal(0, 1, (4, latent))
     lab = onehot[np.random.choice(N, 4), ...]
@@ -159,18 +178,22 @@ for epoch in range(epochs):
     plt.subplot(221)
     plt.imshow(gx[0, ..., 0])
     plt.title(str(np.argmax(lab[0, ...])))
+    plt.colorbar()
 
     plt.subplot(222)
     plt.imshow(gx[1, ..., 0])
     plt.title(str(np.argmax(lab[1, ...])))
+    plt.colorbar()
 
     plt.subplot(223)
     plt.imshow(gx[2, ..., 0])
     plt.title(str(np.argmax(lab[2, ...])))
+    plt.colorbar()
 
     plt.subplot(224)
     plt.imshow(gx[3, ..., 0])
     plt.title(str(np.argmax(lab[3, ...])))
+    plt.colorbar()
 
     plt.savefig("images/epoch_" + str(epoch) + ".pdf")
     plt.clf()
