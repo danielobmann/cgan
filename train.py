@@ -1,201 +1,135 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+from networks.discriminator import PatchDiscriminator
+from networks.generator import Generator
+from utils import get_data
+from tqdm import trange
 
-sess = tf.Session()
-
-train, test = tf.keras.datasets.mnist.load_data()
-x_train = train[0]/255.
-x_train = x_train[..., None]
-y_train = train[1]
-
-onehot = np.zeros((y_train.size, y_train.max()+1))
-onehot[np.arange(y_train.size), y_train] = 1
-
-latent = 49
-img_size = (28, 28, 1)
-classes = 10
+latentdim = 16**2
+steps = 4
+train_loader, val_loader = get_data()
 
 
-def conv_layer(inp, filters, kernel_size=(3, 3), dropout=0, transpose=False, **kwargs):
-    out = tf.keras.layers.Conv2D(filters, kernel_size=kernel_size, padding='same', **kwargs)(inp)
-    if transpose:
-        out = tf.keras.layers.Conv2DTranspose(filters, kernel_size=kernel_size, padding='valid', **kwargs)(inp)
-    if dropout:
-        out = tf.keras.layers.Dropout(rate=dropout)(out)
-    out = tf.keras.layers.PReLU(shared_axes=[1, 2])(out)
-    return out
+def prepare_batch(batch, latentdim=latentdim, sigma=0.1):
+    z = torch.rand(batch.size(0), latentdim, device=batch.device)
+    inp = batch.clone() + sigma*torch.randn(batch.shape, device=batch.device)
+    inp[..., [1, 4, 32, 33, 35, 36], :] = 0
+    out = batch.clone()
+    return inp, z, out
 
 
-# Define the generator
-def get_generator(lat_dim=49, class_dim=10, filters=32):
-    latent_input = tf.keras.layers.Input((lat_dim,))
-    m = int(np.sqrt(lat_dim))
-    z = tf.keras.layers.Reshape((m, m, 1))(latent_input)
-    z = conv_layer(z, filters=filters)
-    z = conv_layer(z, filters=filters)
-    z = conv_layer(z, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
-    z = conv_layer(z, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
-    z = conv_layer(z, filters=filters)
+G = Generator(latentdim=latentdim, steps=steps, filters=64, zsteps=3).cuda()
+D = PatchDiscriminator(steps=3).cuda()
 
-    label_input = tf.keras.layers.Input((class_dim, ))
-    y = tf.keras.layers.Dense(lat_dim)(label_input)
-    y = tf.keras.layers.Reshape((m, m, 1))(y)
-    y = conv_layer(y, filters=filters)
-    y = conv_layer(y, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
-    y = conv_layer(y, filters=filters, transpose=True, kernel_size=(2, 2), strides=(2, 2))
-    y = conv_layer(y, filters=filters)
+trainable_G = [p for p in G.parameters() if p.requires_grad]
+trainable_D = [p for p in D.parameters() if p.requires_grad]
 
-    out = tf.keras.layers.Concatenate()([z, y])
-    out = conv_layer(out, filters=filters)
-    out = conv_layer(out, filters=filters)
-    out = tf.keras.layers.Conv2D(1, kernel_size=(3, 3), padding='same', activation='relu')(out)
+total_G = sum(p.numel() for p in trainable_G)
+total_D = sum(p.numel() for p in trainable_D)
+print("Number of parameters: %d" % total_G)
+print("Number of discriminator parameters: %d" % total_D)
 
-    generator = tf.keras.Model(inputs=[latent_input, label_input], outputs=out)
-    return generator
+epochs = 3000
+plotting = 50
+D_steps = 10
+eps = 1e-6
+lr = 2e-4
+opt_G = torch.optim.Adam(trainable_G, lr=lr)
+opt_D = torch.optim.Adam(trainable_D, lr=lr)
 
-
-# Define discriminator
-def get_discriminator(img_dim=(28, 28, 1), class_dim=10, filters=32):
-    img_input = tf.keras.layers.Input(img_dim)
-
-    d = conv_layer(img_input, filters=filters)
-    d = conv_layer(d, filters=filters)
-    d = conv_layer(d, filters=filters, strides=(2, 2))
-    d = conv_layer(d, filters=filters, strides=(2, 2))
-    d = tf.keras.layers.Flatten()(d)
-    d = tf.keras.layers.Dense(class_dim, activation='relu')(d)
-
-    label_input = tf.keras.layers.Input((class_dim,))
-    dy = tf.keras.layers.Dense(128, activation='relu')(label_input)
-    dy = tf.keras.layers.Dense(128, activation='relu')(dy)
-    dy = tf.keras.layers.Dense(class_dim, activation='relu')(dy)
-
-    out = tf.keras.layers.Concatenate()([d, dy])
-    out = tf.keras.layers.Dense(256, activation='relu')(out)
-    out = tf.keras.layers.Dense(1, activation='sigmoid')(out)
-
-    discriminator = tf.keras.Model(inputs=[img_input, label_input], outputs=out)
-    return discriminator
-
-
-gen = get_generator(filters=32)
-gvars = gen.trainable_variables
-
-disc = get_discriminator(filters=16)
-dvars = disc.trainable_variables
-
-
-# Discriminator tries to map x_true to output 1 and generator_out to output 0
-# Generator tries to find images such that discriminator thinks they are output 1
-LAM = 1e0
-lr = 1e-5
-z = tf.placeholder(tf.float32, (None, latent))
-label = tf.placeholder(tf.float32, (None, classes))
-x_true = tf.placeholder(tf.float32, (None, ) + img_size)
-line = tf.placeholder(tf.float32, (None, 1, 1, 1))
-
-x_gen = gen([z, label])
-x_line = x_true*line + x_gen*(1-line)
-
-
-lip = LAM*sum([(tf.reduce_mean(g**2)-1)**2 for g in tf.gradients(disc([x_line, label]), [x_line, label])])
-
-loss_disc = tf.reduce_mean(disc([x_gen, label]) - disc([x_true, label]) + lip)
-loss_gen = -tf.reduce_mean(disc([x_gen, label]))
-
-
-opt = tf.train.AdamOptimizer(learning_rate=lr)
-
-grads_gen, _ = tf.clip_by_global_norm(tf.gradients(loss_gen, gvars), 1.)
-grads_disc, _ = tf.clip_by_global_norm(tf.gradients(loss_disc, dvars), 1.)
-
-train_gen = opt.apply_gradients(zip(grads_gen, gvars))
-train_disc = opt.apply_gradients(zip(grads_disc, dvars))
-
-############
-# Active gradients
-
-total_gen = int(np.sum([np.prod(t.shape) for t in gvars]))
-active_gen = sum([tf.count_nonzero(grad) for grad in grads_gen if grad is not None])/total_gen
-
-total_disc = int(np.sum([np.prod(t.shape) for t in dvars]))
-active_disc = sum([tf.count_nonzero(grad) for grad in grads_disc if grad is not None])/total_disc
-
-
-def print_info(progress, ld, lg, active_d, active_g, lip):
-    print("Progress: %f, Disc: %f (%f), Gen: %f (%f), Lip: %f" % (progress, ld, active_d, lg, active_g, lip), end='\r')
-    pass
-
-
-def get_disc_batch(batch_size, latent=49, N=60000):
-    idx = np.random.choice(N, batch_size)
-    lat = np.random.normal(0, 1, (batch_size, latent))
-    x_r, lab = x_train[idx, ...], onehot[idx, ...]
-    t = np.random.uniform(0, 1, (batch_size, 1, 1, 1))
-    return {x_true: x_r, z: lat, label: lab, line: t}
-
-
-def get_gen_batch(batch_size, latent=49, N=60000):
-    idx = np.random.choice(N, batch_size)
-    lat = np.random.normal(0, 1, (batch_size, latent))
-    lab = onehot[idx, ...]
-    return {z: lat, label: lab}
-
-
-sess.run(tf.global_variables_initializer())
-
-epochs = 200
-ncritic = 5
-batch_size = 32
-N = 60000
+crit = nn.L1Loss()
+pbar = trange(epochs, unit="epoch", disable=epochs <= 0)
+LOSS = []
+VAL_LOSS = []
+DISC_LOSS = []
 
 for epoch in range(epochs):
-    LOSSD = []
-    LOSSG = []
-    print("### Epoch %d ###" % epoch)
+    train_loss = []
+    disc_loss = []
+    val_loss = []
 
-    for batch in range(N // batch_size):
-        CRITIC = []
-        critic_batches = [get_disc_batch(batch_size=batch_size) for i in range(ncritic)]
-        for i in range(ncritic):
-            fd = get_disc_batch(batch_size=batch_size)
-            ld, _, lipschitz, dd = sess.run([loss_disc, train_disc, lip, active_disc], feed_dict=fd)
-            CRITIC.append(ld)
+    for dstep in range(D_steps):
+        for batch in train_loader:
+            opt_D.zero_grad()
+            batch = batch.cuda()
+            inp, z, out = prepare_batch(batch=batch)
+            interp = out.clone()
+            interp.requires_grad = True
+            grads = D(interp, inp).mean()
+            grads = torch.autograd.grad(grads, interp)[0].pow(2).mean()
+            pred = G(z, inp)
+            loss = D(out, inp) - D(pred, inp) + grads
+            loss = loss.mean()
+            disc_loss.append(loss.item())
+            loss.backward()
+            opt_D.step()
 
-        fd = get_gen_batch(batch_size=batch_size)
-        lg, _, dg = sess.run([loss_gen, train_gen, active_gen], feed_dict=fd)
+    for batch in train_loader:
+        opt_G.zero_grad()
+        batch = batch.cuda()
+        inp, z, out = prepare_batch(batch=batch)
+        pred = G(z, inp)
+        loss = D(pred, inp).mean() + crit(pred, out)
+        train_loss.append(loss.item())
 
-        LOSSG.append(lg)
-        LOSSD.append(np.mean(CRITIC))
-        print_info((batch*batch_size)/N, ld, lg, dd, dg, lipschitz)
+        loss.backward()
+        opt_G.step()
 
-    lat = np.random.normal(0, 1, (4, latent))
-    lab = onehot[np.random.choice(N, 4), ...]
+    for batch in val_loader:
+        batch = batch.cuda()
+        inp, z, out = prepare_batch(batch=batch)
+        pred = G(z, inp)
+        loss = D(pred, inp).mean() + crit(pred, out)
+        val_loss.append(loss.item())
 
-    gx = sess.run(gen([z, label]), feed_dict={z: lat, label: lab})
+    pbar.set_postfix({"loss": np.mean(train_loss),
+                      "disc_loss": np.mean(disc_loss),
+                      "val_loss": np.mean(val_loss)})
+    pbar.update(1)
+    LOSS.append(np.mean(train_loss))
+    VAL_LOSS.append(np.mean(val_loss))
+    DISC_LOSS.append(np.mean(disc_loss))
 
-    plt.subplot(221)
-    plt.imshow(gx[0, ..., 0])
-    plt.title(str(np.argmax(lab[0, ...])))
-    plt.colorbar()
+    if (epoch+1) % plotting == 0:
+        batch = next(iter(val_loader))
+        batch = batch.cuda()
+        inp, z, out = prepare_batch(batch)
+        pred = G(z, inp)
+        probs = D(pred, inp)
+        for i in range(batch.size(0)):
+            plt.subplot(221)
+            plt.imshow(inp.cpu().detach().numpy()[i, 0, ...])
+            plt.colorbar()
+            plt.title("Input")
+            plt.axis('off')
 
-    plt.subplot(222)
-    plt.imshow(gx[1, ..., 0])
-    plt.title(str(np.argmax(lab[1, ...])))
-    plt.colorbar()
+            plt.subplot(222)
+            plt.imshow(pred.cpu().detach().numpy()[i, 0, ...])
+            plt.colorbar()
+            plt.title("Prediction")
+            plt.axis('off')
 
-    plt.subplot(223)
-    plt.imshow(gx[2, ..., 0])
-    plt.title(str(np.argmax(lab[2, ...])))
-    plt.colorbar()
+            plt.subplot(223)
+            plt.imshow(out.cpu().detach().numpy()[i, 0, ...])
+            plt.colorbar()
+            plt.title("True")
+            plt.axis('off')
 
-    plt.subplot(224)
-    plt.imshow(gx[3, ..., 0])
-    plt.title(str(np.argmax(lab[3, ...])))
-    plt.colorbar()
+            plt.subplot(224)
+            plt.imshow(probs.cpu().detach().numpy()[i, 0, ...], vmin=0, vmax=1, cmap='magma')
+            plt.colorbar()
+            plt.title("Discriminator")
+            plt.axis('off')
 
-    plt.savefig("images/epoch_" + str(epoch) + ".pdf")
-    plt.clf()
+            plt.savefig("images/epoch%d_batch%d.pdf" % (epoch+1, i+1), dpi=1000)
+            plt.clf()
 
-    print("###############")
+        plt.plot(LOSS, label="train")
+        plt.plot(VAL_LOSS, label="val")
+        plt.plot(DISC_LOSS, label="disc")
+        plt.ylim(-1.1, max(LOSS) + 1)
+        plt.legend()
+        plt.savefig("images/loss.pdf", dpi=1000)
+        plt.clf()

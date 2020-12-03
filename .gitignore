@@ -1,3 +1,6 @@
 *.pdf
 *.png
 
+# Folders
+__pycache__/
+data/
